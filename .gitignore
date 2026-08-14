@@ -25,6 +25,7 @@ venv/
 # Dashboard build — generate ulang dengan npm run build
 dashboard/node_modules/
 dashboard/dist/
+node_modules/
 
 # OpenH264 test file
 test.mp4
