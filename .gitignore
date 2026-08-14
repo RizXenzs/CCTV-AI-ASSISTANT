@@ -1,0 +1,45 @@
+# Environment variables (credentials) — JANGAN pernah di-commit
+.env
+
+# Data & database (terlalu besar, sensitif)
+data/
+snapshots/
+
+# Model files (terlalu besar, download ulang saja)
+*.pt
+yolov8n_openvino_model/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Dashboard build — generate ulang dengan npm run build
+dashboard/node_modules/
+dashboard/dist/
+
+# OpenH264 test file
+test.mp4
+test.webm
+
+# Log files
+*.log
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Cloudflared binary (download sendiri)
+cloudflared.exe
+
+# IDE
+.vscode/
+.idea/

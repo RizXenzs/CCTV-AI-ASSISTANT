@@ -1,0 +1,42 @@
+alert_cooldown_sec: 30
+cameras:
+- active_hours: 22:00-05:00
+  camera_id: cam_01
+  enabled: true
+  name: ruang teknisi
+  rtsp_url: rtsp://admin:password123%23@10.10.11.102:554/Streaming/Channels/101
+- active_hours: null
+  camera_id: cam_02
+  enabled: false
+  name: Backyard Camera
+  rtsp_url: ''
+confidence_threshold: 0.15
+critical_score_threshold: 80
+database:
+  cleanup_days: 30
+  path: data/cctv_events.db
+  snapshot_dir: snapshots
+detect_fps_target: 10
+device_mode: auto
+frame_skip: 0
+input_resolution:
+- 640
+- 480
+log_file: data/cctv_ai.log
+log_level: INFO
+model_name: yolov8n.pt
+motion_gate_enabled: true
+motion_history: 500
+motion_sensitivity: low
+motion_var_threshold: 16
+snapshot_interval_sec: 120
+snapshot_quality: 85
+stability_window_sec: 1
+suspicious_score_threshold: 30
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+  rate_limit_interval: 3.0
+  retry_backoff_base: 1.0
+  retry_count: 3
+  send_timeout: 30

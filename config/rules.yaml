@@ -1,0 +1,149 @@
+# ============================================
+# AI CCTV Detection — Suspicious Behavior Rules
+# ============================================
+# Each rule contributes a score_delta when its condition is met.
+# Total score per tracked person determines suspicion level.
+# Event triggers when score >= suspicious_score_threshold (default 70)
+# for stability_window_sec (default 3s), OR when a critical rule fires.
+
+rules:
+  # --- Rule 1: Restricted Zone Entry (CRITICAL) ---
+  - id: restricted_zone_entry
+    enabled: true
+    condition:
+      type: zone_entry
+      zone: restricted_zone
+    score_delta: 90
+    cooldown_sec: 60
+    critical: true
+    reason: "Masuk area terlarang"
+
+  # --- Rule 2: Loitering / Berkeliaran ---
+  - id: loitering
+    enabled: true
+    condition:
+      type: dwell_time
+      zone: door_zone
+      min_sec: 25
+    score_delta: 35
+    cooldown_sec: 30
+    critical: false
+    reason: "Berkeliaran terlalu lama"
+
+  # --- Rule 3: Fast Approach ---
+  - id: fast_approach
+    enabled: true
+    condition:
+      type: speed
+      min_px_per_sec: 180
+      toward_zone: door_zone
+    score_delta: 30
+    cooldown_sec: 15
+    critical: false
+    reason: "Mendekat cepat ke pintu"
+
+  # --- Rule 4: Night Activity ---
+  - id: night_activity
+    enabled: true
+    condition:
+      type: active_hours
+    score_delta: 50
+    cooldown_sec: 0
+    critical: true
+    reason: "Aktivitas pada malam hari"
+
+  # --- Rule 4b: Night Intrusion ---
+  - id: night_intrusion
+    enabled: true
+    condition:
+      type: new_track_appearance
+      within_sec: 1
+    score_delta: 90
+    cooldown_sec: 30
+    critical: true
+    reason: "Kemunculan manusia di malam hari"
+
+  # --- Rule 4c: Line Crossing ---
+  - id: line_crossing_gate
+    enabled: true
+    condition:
+      type: line_crossing
+      line_name: front_gate
+      direction: in
+    score_delta: 75
+    cooldown_sec: 15
+    critical: false
+    reason: "Seseorang memasuki gerbang depan"
+
+  # --- Rule 5: Multiple Persons ---
+  - id: multiple_persons
+    enabled: true
+    condition:
+      type: person_count
+      min_count: 3
+    score_delta: 25
+    cooldown_sec: 30
+    critical: false
+    reason: "Jumlah orang tidak normal"
+
+  # --- Rule 6: Back and Forth (Mondar-Mandir) ---
+  - id: back_and_forth
+    enabled: true
+    condition:
+      type: trajectory_pattern
+      pattern: "back_and_forth"
+      window_sec: 20
+      min_turns: 3
+    score_delta: 30
+    cooldown_sec: 30
+    critical: false
+    reason: "Mondar-mandir mencurigakan"
+
+  # --- Rule 7: Crouch-Like Posture ---
+  - id: crouch_like
+    enabled: true
+    condition:
+      type: bbox_aspect_change
+      max_height_ratio: 0.6
+      duration_sec: 2
+    score_delta: 20
+    cooldown_sec: 15
+    critical: false
+    reason: "Postur merunduk/bersembunyi"
+
+  # --- Rule 8: Motion Without Person ---
+  - id: motion_without_person
+    enabled: true
+    condition:
+      type: motion_only
+      motion_level: high
+      person_detected: false
+      duration_sec: 3
+    score_delta: 15
+    cooldown_sec: 30
+    critical: false
+    reason: "Gerakan kuat tanpa person (bayangan/objek)"
+
+  # --- Rule 9: Sudden Entry Near Restricted Zone ---
+  - id: sudden_entry
+    enabled: true
+    condition:
+      type: new_track_appearance
+      near_zone: restricted_zone
+      within_sec: 2
+    score_delta: 25
+    cooldown_sec: 15
+    critical: false
+    reason: "Muncul mendadak dekat area terlarang"
+
+  # --- Rule 10: Camera Tamper Suspect (CRITICAL) ---
+  - id: camera_tamper_suspect
+    enabled: true
+    condition:
+      type: scene_change
+      black_frame_ratio_min: 0.8
+      duration_sec: 2
+    score_delta: 80
+    cooldown_sec: 120
+    critical: true
+    reason: "Indikasi kamera ditutup/gelap"

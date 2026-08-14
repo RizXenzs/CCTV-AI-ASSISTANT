@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  cctv-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cctv-ai:latest
+    container_name: cctv-ai
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./snapshots:/app/snapshots
+      # Optional: pass .env file explicitly if needed, but we pass vars directly below
+    env_file:
+      - .env
+    # environment:
+    #   - TZ=Asia/Jakarta  # Set your timezone
+    #   - DEVICE_MODE=cpu
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # For GPU support (requires nvidia-container-toolkit installed on host)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

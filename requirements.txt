@@ -1,0 +1,11 @@
+ultralytics>=8.2.0
+supervision>=0.21.0
+opencv-python-headless>=4.9.0
+python-telegram-bot>=21.0
+aiosqlite>=0.20.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
+Pillow>=10.0.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
