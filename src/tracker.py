@@ -24,6 +24,7 @@ class TrackPoint:
     bbox: Tuple[float, float, float, float]  # (x1, y1, x2, y2)
     confidence: float
     timestamp: float  # time.time()
+    keypoints: Optional[np.ndarray] = None  # (17, 2) or (17, 3) keypoints array
 
 
 @dataclass
@@ -63,6 +64,13 @@ class TrackHistory:
         if self.points:
             return self.points[-1].confidence
         return 0.0
+
+    @property
+    def latest_keypoints(self) -> Optional[np.ndarray]:
+        """Get the most recent keypoints."""
+        if self.points:
+            return self.points[-1].keypoints
+        return None
 
 
 class PersonTracker:
@@ -114,11 +122,16 @@ class PersonTracker:
 
         logger.info("[%s] PersonTracker initialized (ByteTrack)", camera_id)
 
-    def update(self, detections: sv.Detections) -> sv.Detections:
+    def update(
+        self, 
+        detections: sv.Detections, 
+        keypoints: Optional[sv.KeyPoints] = None
+    ) -> sv.Detections:
         """Update tracker with new detections.
 
         Args:
             detections: Person detections from the current frame.
+            keypoints: Associated keypoints (if available).
 
         Returns:
             Tracked detections with tracker_id assigned.
@@ -132,6 +145,14 @@ class PersonTracker:
         current_ids = set()
 
         if tracked.tracker_id is not None:
+            # We need to map tracked back to original detections to get keypoints
+            # ByteTrack reorders/filters detections, but tracked.class_id etc might be preserved.
+            # supervision ByteTrack preserves the original index in some versions, 
+            # but usually we can match by bbox IoU or just rely on the fact that 
+            # tracked returns the same xyxy order or we can just use the xyxy.
+            # Let's match tracked to original keypoints using bbox centers or IoU.
+            # Actually, `tracked.tracker_id` is aligned with `tracked.xyxy`.
+            
             for i, track_id in enumerate(tracked.tracker_id):
                 track_id = int(track_id)
                 current_ids.add(track_id)
@@ -143,12 +164,24 @@ class PersonTracker:
                 conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
                 class_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
                 class_type = "human" if class_id == 0 else "animal"
+                
+                # Match keypoints (find closest bbox in original detections)
+                kp = None
+                if keypoints is not None and keypoints.xy is not None and len(keypoints.xy) > 0:
+                    # Find closest bbox by center
+                    orig_centers_x = (detections.xyxy[:, 0] + detections.xyxy[:, 2]) / 2
+                    orig_centers_y = (detections.xyxy[:, 1] + detections.xyxy[:, 3]) / 2
+                    dists = (orig_centers_x - cx)**2 + (orig_centers_y - cy)**2
+                    closest_idx = np.argmin(dists)
+                    if dists[closest_idx] < 100: # threshold for match
+                        kp = keypoints.xy[closest_idx]
 
                 point = TrackPoint(
                     centroid=(cx, cy),
                     bbox=bbox,
                     confidence=conf,
                     timestamp=now,
+                    keypoints=kp,
                 )
 
                 if track_id not in self._tracks:

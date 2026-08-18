@@ -10,13 +10,25 @@ echo Waiting for backend to initialize...
 timeout /t 5 /nobreak >nul
 
 REM Open the dashboard in the default browser
-echo Opening Dashboard locally at http://localhost:8000
-start http://localhost:8000
+REM Start Cloudflared Tunnel for seamless mobile public access
+echo Starting Cloudflared Tunnel for Public Access...
+start "Cloudflared Public Link" cmd /k "cloudflared.exe tunnel --url http://localhost:8000"
 
-REM Start Cloudflare Tunnel for public access
-echo Starting Cloudflare Tunnel for Public Access...
-start "Cloudflare Public Link" cmd /k "cloudflared.exe tunnel --url http://127.0.0.1:8000"
-
-echo Done! The CCTV AI and Public Tunnel are running in the other windows.
+echo ====================================================
+echo  CCTV AI Backend and Public Tunnel are running.
+echo.
+echo  [1] LOCAL PC ACCESS:
+echo      http://localhost:8000
+echo.
+echo  [2] MOBILE ACCESS (LAN / Wi-Fi yang sama):
+for /f "delims=" %%I in ('python -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8', 80)); print(s.getsockname()[0]); s.close()"') do (
+    echo      http://%%I:8000
+)
+echo.
+echo  [3] MOBILE ACCESS (Internet / Telegram):
+echo      - Cek jendela "Cloudflared Public Link" untuk mendapatkan URL (https://xxxx.trycloudflare.com)
+echo      - Masukkan URL tersebut ke Dashboard - Telegram Config.
+echo ====================================================
 echo Press any key to exit this launcher...
 pause >nul
+
