@@ -147,3 +147,48 @@ rules:
     cooldown_sec: 120
     critical: true
     reason: "Indikasi kamera ditutup/gelap"
+
+  # --- Rule 11: Person Berdiri Diam ---
+  - id: person_berdiri_diam
+    enabled: true
+    condition:
+      type: posture_state
+      state: berdiri_diam
+      min_duration_sec: 10
+    score_delta: 15
+    cooldown_sec: 30
+    critical: false
+    reason: "Seseorang berdiri diam terlalu lama"
+
+  # --- Rule 12: Person Duduk ---
+  - id: person_duduk
+    enabled: true
+    condition:
+      type: posture_state
+      state: duduk
+      min_duration_sec: 15
+    score_delta: 10
+    cooldown_sec: 30
+    critical: false
+    reason: "Seseorang terdeteksi sedang duduk"
+
+  # --- Rule 13: Person Berjalan ---
+  - id: person_berjalan
+    enabled: true
+    condition:
+      type: posture_state
+      state: berjalan
+    score_delta: 5
+    cooldown_sec: 15
+    critical: false
+    reason: "Seseorang terdeteksi sedang berjalan"
+
+  # --- Rule 14: Person Detected (Sensitif — trigger setiap ada orang) ---
+  - id: person_detected
+    enabled: true
+    condition:
+      type: person_detected
+    score_delta: 15
+    cooldown_sec: 5
+    critical: false
+    reason: "Orang terdeteksi di kamera"

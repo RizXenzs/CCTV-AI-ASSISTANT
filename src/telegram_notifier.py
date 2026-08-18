@@ -8,6 +8,7 @@ Implements exponential backoff retry (3x) and per-chat rate limiting.
 import asyncio
 import io
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ class TelegramNotifier:
         self.retry_backoff_base = retry_backoff_base
         self.rate_limit_interval = rate_limit_interval
         self.send_timeout = send_timeout
+        self.public_url = os.environ.get("PUBLIC_URL", "").strip()
 
         # Rate limiting
         self._last_send_time: float = 0.0
@@ -124,6 +126,8 @@ class TelegramNotifier:
             f"🔖 *Event:* {event_esc}\n"
             f"🕐 *Time:* {local_time_esc}"
         )
+        if self.public_url:
+            caption += f"\n🔗 *Dashboard:* [Buka Link]({self.public_url})"
         
         return await self._do_send_video(caption, video_path)
         
@@ -216,6 +220,8 @@ class TelegramNotifier:
             f"👤 *Track IDs:* {self._escape_md(tracks_str)}\n"
             f"🔖 *Event:* {event_esc}"
         )
+        if self.public_url:
+            caption += f"\n🔗 *Dashboard:* [Buka Link]({self.public_url})"
 
         return await self._send_message_with_photo(caption, snapshot_path)
 
@@ -254,6 +260,8 @@ class TelegramNotifier:
             f"🕐 *Time:* {local_time_esc}\n"
             f"⚠️ *Score:* {score_esc}"
         )
+        if self.public_url:
+            caption += f"\n🔗 *Dashboard:* [Buka Link]({self.public_url})"
 
         return await self._send_message_with_photo(caption, snapshot_path)
 
@@ -278,7 +286,7 @@ class TelegramNotifier:
         if not self._enabled or self._bot is None:
             return False
 
-        local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        local_time_esc = self._escape_md(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         duration_min = duration_sec / 60
 
         text = (
@@ -286,10 +294,12 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📹 *Camera:* {self._escape_md(camera_name)}\n"
             f"🔖 *Event:* {event_id[:8]}\n"
-            f"🕐 *Resolved at:* {local_time}\n"
+            f"🕐 *Resolved at:* {local_time_esc}\n"
             f"⏱️ *Duration:* {duration_min:.1f} minutes\n"
             f"📸 *Snapshots:* {total_snapshots}"
         )
+        if self.public_url:
+            text += f"\n🔗 *Dashboard:* [Buka Link]({self.public_url})"
 
         return await self._send_text(text)
 

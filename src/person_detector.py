@@ -7,6 +7,7 @@ Supports CPU, CUDA, OpenVINO, and auto device selection.
 """
 
 import logging
+import asyncio
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -41,6 +42,7 @@ class DetectionResult:
     persons: sv.Detections        # Only person detections (for tracking/alerts)
     animals: sv.Detections        # Only animal detections (for display, no alert)
     all_detections: sv.Detections # All detections combined
+    person_keypoints: Optional[sv.KeyPoints] = None  # Keypoints for persons (if pose model used)
     person_count: int = 0
     animal_count: int = 0
 
@@ -54,7 +56,7 @@ class PersonDetector:
 
     def __init__(
         self,
-        model_name: str = "yolov8n.pt",
+        model_name: str = "yolov8n-pose.pt",
         device_mode: str = "auto",
         confidence_threshold: float = 0.4,
         iou_threshold: float = 0.5,
@@ -82,7 +84,7 @@ class PersonDetector:
         except ImportError:
             has_openvino = False
 
-        if has_openvino and model_name.endswith(".pt") and self.device == "cpu":
+        if has_openvino and model_name.endswith(".pt") and (self.device == "cpu" or self.device.startswith("intel:")):
             ov_model_name = model_name.replace(".pt", "_openvino_model")
             import os
             if not os.path.exists(ov_model_name):
@@ -90,12 +92,12 @@ class PersonDetector:
                 temp_model = YOLO(model_name)
                 temp_model.export(format="openvino")
             model_name = ov_model_name
-            # Keep self.device as "cpu" so Ultralytics doesn't complain about invalid device string
             logger.info("Using OpenVINO optimized model: %s", model_name)
 
         # Load model
         logger.info("Loading YOLO model: %s on device: %s", model_name, self.device)
         self.model = YOLO(model_name)
+        self._lock = asyncio.Lock()
 
         # Warmup inference (helps with first-frame latency)
         self._warmup()
@@ -124,6 +126,9 @@ class PersonDetector:
                 logger.warning("PyTorch CUDA not available, falling back to CPU")
                 return "cpu"
 
+        elif device_mode.startswith("intel:"):
+            return device_mode
+
         elif device_mode == "auto":
             try:
                 import torch
@@ -133,6 +138,16 @@ class PersonDetector:
                     return "cuda"
             except ImportError:
                 pass
+            
+            try:
+                import openvino as ov
+                core = ov.Core()
+                if "GPU" in core.available_devices:
+                    logger.info("Auto-detected OpenVINO GPU")
+                    return "intel:gpu"
+            except Exception:
+                pass
+
             logger.info("Auto-detected device: CPU")
             return "cpu"
 
@@ -208,13 +223,37 @@ class PersonDetector:
         persons = all_detections[person_mask]
         animals = all_detections[animal_mask]
 
+        # Extract keypoints if available (YOLO-Pose model)
+        person_keypoints = None
+        if hasattr(results[0], 'keypoints') and results[0].keypoints is not None:
+            # ultralytics keypoints
+            try:
+                # Get all keypoints, filter by person mask
+                all_keypoints = sv.KeyPoints.from_ultralytics(results[0])
+                if all_keypoints.xy is not None and len(all_keypoints.xy) == len(all_detections):
+                    person_keypoints = all_keypoints[person_mask]
+            except Exception as e:
+                logger.warning(f"Failed to parse keypoints: {e}")
+
         return DetectionResult(
             persons=persons,
             animals=animals,
             all_detections=all_detections,
+            person_keypoints=person_keypoints,
             person_count=len(persons),
             animal_count=len(animals),
         )
+
+    async def detect_all_async(self, frame: np.ndarray) -> DetectionResult:
+        """Run detection asynchronously without blocking the event loop.
+        
+        Uses an asyncio.Lock to ensure only one frame is passed to the YOLO model 
+        at a time, preventing CPU/GPU thrashing and OOM errors in multi-camera setups.
+        """
+        async with self._lock:
+            # Run the synchronous inference in a separate thread
+            result = await asyncio.to_thread(self.detect_all, frame)
+            return result
 
     @staticmethod
     def get_class_name(class_id: int) -> str:

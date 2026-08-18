@@ -1,15 +1,27 @@
+alarm_gate:
+  confidence_gate: 0.3
+  max_aspect_ratio: 5.0
+  max_bbox_ratio: 0.5
+  min_bbox_area: 400
+  min_frames: 1
 alert_cooldown_sec: 30
 cameras:
-- active_hours: 22:00-05:00
-  camera_id: cam_01
-  enabled: true
-  name: ruang teknisi
-  rtsp_url: rtsp://admin:password123%23@10.10.11.102:554/Streaming/Channels/101
 - active_hours: null
-  camera_id: cam_02
-  enabled: false
-  name: Backyard Camera
-  rtsp_url: ''
+  camera_id: ''
+  enabled: true
+  name: gudang room
+  roi_zones:
+    restricted_zone:
+      points:
+      - - 100
+        - 200
+      - - 400
+        - 200
+      - - 400
+        - 500
+      - - 100
+        - 500
+  rtsp_url: rtsp://admin:password123%23@10.10.11.119:554/Streaming/Channels/101
 confidence_threshold: 0.15
 critical_score_threshold: 80
 database:
@@ -32,7 +44,12 @@ motion_var_threshold: 16
 snapshot_interval_sec: 120
 snapshot_quality: 85
 stability_window_sec: 1
-suspicious_score_threshold: 30
+storage:
+  auto_delete_threshold: 95
+  critical_percent: 90
+  retention_days: 30
+  warning_percent: 80
+suspicious_score_threshold: 10
 telegram:
   bot_token: ${TELEGRAM_BOT_TOKEN}
   chat_id: ${TELEGRAM_CHAT_ID}

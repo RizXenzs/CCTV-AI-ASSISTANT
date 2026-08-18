@@ -33,6 +33,8 @@ from src.event_manager import EventManager, EventState
 from src.snapshot_scheduler import SnapshotScheduler
 from src.telegram_notifier import TelegramNotifier
 from src.event_recorder import EventRecorder
+from src.alarm_gate import AlarmGate
+from src.storage_manager import StorageManager
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -132,6 +134,18 @@ class CameraPipeline:
             post_sec=15,
         )
 
+        # Anti-False Alarm Gate (per-camera overrides)
+        gate_conf = camera_config.alarm_gate_confidence or app_config.alarm_gate.confidence_gate
+        gate_frames = camera_config.alarm_gate_min_frames or app_config.alarm_gate.min_frames
+
+        self.alarm_gate = AlarmGate(
+            confidence_gate=gate_conf,
+            min_frames=gate_frames,
+            min_bbox_area=app_config.alarm_gate.min_bbox_area,
+            max_bbox_ratio=app_config.alarm_gate.max_bbox_ratio,
+            max_aspect_ratio=app_config.alarm_gate.max_aspect_ratio,
+        )
+
         # Performance tracking
         self._frame_times: list = []
         self._skip_counter: int = 0
@@ -213,13 +227,17 @@ class CameraPipeline:
 
                 if has_motion or not self.app_config.motion_gate_enabled:
                     # --- 5. Person & Animal detection (YOLO) ---
-                    detection_result = self.detector.detect_all(processed)
+                    # Yields to event loop so other cameras can process while YOLO runs
+                    detection_result = await self.detector.detect_all_async(processed)
                     all_detections = detection_result.all_detections
                     person_count = detection_result.person_count # Only humans trigger events
 
                     # --- 6. Tracking ---
                     if len(all_detections) > 0:
-                        tracked = self.tracker.update(all_detections)
+                        tracked = self.tracker.update(
+                            all_detections, 
+                            keypoints=detection_result.person_keypoints
+                        )
                         
                         # Recalculate person count from active human tracks
                         active_tracks = self.tracker.get_active_tracks()
@@ -233,16 +251,27 @@ class CameraPipeline:
                     import supervision as sv
                     tracked = self.tracker.update(sv.Detections.empty())
 
-                # --- 7. Feature extraction ---
+                # --- 7. Anti-False Alarm Gate ---
+                # Filter tracks through multi-stage validation pipeline
+                # Only validated tracks proceed to feature extraction & rule engine
+                validated_tracks = self.alarm_gate.get_validated_tracks(
+                    self.tracker, processed.shape[:2]
+                )
+
+                # Recalculate person count based on validated human tracks only
+                person_count = len(validated_tracks)
+
+                # --- 8. Feature extraction (only validated tracks) ---
                 black_ratio = compute_black_ratio(processed)
                 track_features, scene_features = self.feature_extractor.extract(
                     tracker=self.tracker,
                     detections=tracked,
                     motion_level=motion_level,
                     black_frame_ratio=black_ratio,
+                    validated_track_ids=set(validated_tracks.keys()),
                 )
 
-                # --- 8. Rule engine ---
+                # --- 9. Rule engine ---
                 track_scores = self.rule_engine.evaluate(
                     track_features, 
                     scene_features,
@@ -250,7 +279,7 @@ class CameraPipeline:
                 )
                 self.latest_track_scores = track_scores
 
-                # --- 9. Event management ---
+                # --- 10. Event management ---
                 event = self.event_manager.update(
                     camera_id=cam_id,
                     has_motion=has_motion,
@@ -258,7 +287,7 @@ class CameraPipeline:
                     track_scores=track_scores,
                 )
 
-                # --- 10. Update best frame for snapshot ---
+                # --- 11. Update best frame for snapshot ---
                 if event and event.is_active:
                     max_conf = 0.0
                     best_bbox = None
@@ -288,23 +317,23 @@ class CameraPipeline:
                         cam_id, event.event_id, frame, max_conf, best_bbox
                     )
 
-                # --- 11. Handle pending alerts ---
+                # --- 12. Handle pending alerts ---
                 for alert_event in self.event_manager.pop_pending_alerts():
                     if alert_event.is_critical:
                         self.event_recorder.start_recording(alert_event.event_id)
                     await self._handle_alert(alert_event, processed)
 
-                # --- 12. Handle periodic snapshots ---
+                # --- 13. Handle periodic snapshots ---
                 for snap_event in self.event_manager.pop_pending_snapshots():
                     await self._handle_periodic_snapshot(snap_event)
 
-                # --- 13. Log tracks (batched) ---
+                # --- 14. Log tracks (batched) ---
                 track_flush_counter += 1
                 if track_flush_counter >= 30:  # Flush every ~30 frames
                     await self.db.flush_tracks()
                     track_flush_counter = 0
 
-                # --- 14. Handle Video Recording Completion ---
+                # --- 15. Handle Video Recording Completion ---
                 is_recording = self.event_recorder.is_recording
                 if self._was_recording and not is_recording:
                     video_path = self.event_recorder.current_file_path
@@ -465,7 +494,9 @@ class CCTVApplication:
         self.event_manager: Optional[EventManager] = None
         self.rule_engine: Optional[RuleEngine] = None
         self.snapshot_scheduler: Optional[SnapshotScheduler] = None
+        self.storage_manager: Optional[StorageManager] = None
         self.pipelines: Dict[str, CameraPipeline] = {}
+        self.pipeline_tasks: Dict[str, asyncio.Task] = {}
         self.shutdown_event = asyncio.Event()
 
     async def initialize(self) -> None:
@@ -548,6 +579,14 @@ class CCTVApplication:
             )
             self.pipelines[cam_config.camera_id] = pipeline
 
+        # 9. Initialize storage manager
+        self.storage_manager = StorageManager(
+            config=self.config.storage,
+            db=self.db,
+            telegram=self.telegram,
+            data_dir=str(self.config_dir / "data")
+        )
+
         logger.info("Initialization complete — %d pipelines ready", len(self.pipelines))
 
     async def run(self) -> None:
@@ -571,7 +610,12 @@ class CCTVApplication:
                 pipeline.run(self.shutdown_event),
                 name=f"pipeline-{cam_id}",
             )
+            self.pipeline_tasks[cam_id] = task
             tasks.append(task)
+            
+        # Start storage manager
+        if self.storage_manager:
+            self.storage_manager.start()
 
         # Add periodic maintenance task
         tasks.append(asyncio.create_task(
@@ -619,8 +663,11 @@ class CCTVApplication:
 
     async def shutdown(self) -> None:
         """Gracefully shut down all components."""
-        logger.info("Shutting down...")
+        logger.info("Initiating shutdown sequence...")
         self.shutdown_event.set()
+
+        if self.storage_manager:
+            self.storage_manager.stop()
 
         # Stop all grabbers
         for pipeline in self.pipelines.values():
@@ -631,6 +678,97 @@ class CCTVApplication:
             await self.db.close()
 
         logger.info("Shutdown complete")
+
+    # ----- Hot Reload: Dynamic Camera Management -----
+
+    def _build_camera_config(self, cam_data: dict) -> CameraConfig:
+        """Build a CameraConfig from a raw dict (as stored in config.yaml)."""
+        from src.config_loader import ROIZone
+        roi_zones = {}
+        for zname, zdata in cam_data.get("roi_zones", {}).items():
+            if isinstance(zdata, dict):
+                roi_zones[zname] = ROIZone(
+                    name=zname,
+                    points=zdata.get("points", []),
+                    zone_type=zdata.get("zone_type", "general"),
+                )
+        return CameraConfig(
+            camera_id=cam_data["camera_id"],
+            name=cam_data.get("name", cam_data["camera_id"]),
+            rtsp_url=cam_data.get("rtsp_url", ""),
+            enabled=cam_data.get("enabled", True),
+            active_hours=cam_data.get("active_hours"),
+            roi_zones=roi_zones,
+            crossing_lines=cam_data.get("crossing_lines", {}),
+            resolution=cam_data.get("resolution"),
+            fps=cam_data.get("fps"),
+            confidence_threshold=cam_data.get("confidence_threshold"),
+            night_mode=cam_data.get("night_mode"),
+            loitering_time_sec=cam_data.get("loitering_time_sec"),
+            alert_threshold=cam_data.get("alert_threshold"),
+            recording_duration_sec=cam_data.get("recording_duration_sec"),
+            alarm_gate_confidence=cam_data.get("alarm_gate_confidence"),
+            alarm_gate_min_frames=cam_data.get("alarm_gate_min_frames"),
+        )
+
+    async def add_camera_pipeline(self, cam_data: dict) -> str:
+        """Dynamically add and start a new camera pipeline at runtime."""
+        cam_config = self._build_camera_config(cam_data)
+        cam_id = cam_config.camera_id
+
+        if cam_id in self.pipelines:
+            return f"Pipeline '{cam_id}' already running"
+
+        if not cam_config.enabled:
+            return f"Camera '{cam_id}' is disabled, not starting pipeline"
+
+        pipeline = CameraPipeline(
+            camera_config=cam_config,
+            app_config=self.config,
+            detector=self.detector,
+            event_manager=self.event_manager,
+            rule_engine=self.rule_engine,
+            snapshot_scheduler=self.snapshot_scheduler,
+            telegram=self.telegram,
+            db=self.db,
+        )
+        self.pipelines[cam_id] = pipeline
+
+        task = asyncio.create_task(
+            pipeline.run(self.shutdown_event),
+            name=f"pipeline-{cam_id}",
+        )
+        self.pipeline_tasks[cam_id] = task
+        logger.info("[%s] Pipeline hot-started (no restart needed)", cam_id)
+        return f"Camera '{cam_config.name}' ({cam_id}) started successfully"
+
+    async def remove_camera_pipeline(self, cam_id: str) -> str:
+        """Dynamically stop and remove a camera pipeline at runtime."""
+        if cam_id not in self.pipelines:
+            return f"Pipeline '{cam_id}' not found (may not be running)"
+
+        pipeline = self.pipelines[cam_id]
+        pipeline.grabber.stop()
+
+        task = self.pipeline_tasks.get(cam_id)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        del self.pipelines[cam_id]
+        self.pipeline_tasks.pop(cam_id, None)
+        logger.info("[%s] Pipeline hot-removed (no restart needed)", cam_id)
+        return f"Camera '{cam_id}' stopped and removed"
+
+    async def update_camera_pipeline(self, cam_id: str, cam_data: dict) -> str:
+        """Dynamically update a camera pipeline (stop old → start new)."""
+        await self.remove_camera_pipeline(cam_id)
+        result = await self.add_camera_pipeline(cam_data)
+        logger.info("[%s] Pipeline hot-reloaded (no restart needed)", cam_id)
+        return result
 
     async def _maintenance_loop(self) -> None:
         """Periodic maintenance: DB cleanup, snapshot cleanup, etc."""

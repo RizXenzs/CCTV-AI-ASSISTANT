@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import re
+import psutil
+import GPUtil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -43,17 +45,31 @@ class CameraAddRequest(BaseModel):
     name: str
     rtsp_url: str
     enabled: bool = True
+    active_hours: Optional[str] = None
+    # Per-camera overrides
+    resolution: Optional[List[int]] = None
+    fps: Optional[int] = None
+    confidence_threshold: Optional[float] = None
+    night_mode: Optional[bool] = None
+    loitering_time_sec: Optional[float] = None
+    alert_threshold: Optional[float] = None
+    recording_duration_sec: Optional[int] = None
+    alarm_gate_confidence: Optional[float] = None
+    alarm_gate_min_frames: Optional[int] = None
+    roi_zones: Optional[dict] = None
+    crossing_lines: Optional[dict] = None
 
 class TelegramConfigRequest(BaseModel):
     bot_token: str
     chat_id: str
+    public_url: Optional[str] = None
 
 class TelegramTestRequest(BaseModel):
     bot_token: str
     chat_id: str
+    public_url: Optional[str] = None
     message: str = "🔔 Test notification from CCTV AI Dashboard"
 
-# --- Live Streaming ---
 async def mjpeg_generator(app: CCTVApplication, camera_id: str):
     """Generator for MJPEG stream from the latest camera frame."""
     pipeline = app.pipelines.get(camera_id)
@@ -66,6 +82,12 @@ async def mjpeg_generator(app: CCTVApplication, camera_id: str):
 
     while not app.shutdown_event.is_set():
         start_time = asyncio.get_event_loop().time()
+
+        # Fetch pipeline dynamically in case it was hot-reloaded
+        pipeline = app.pipelines.get(camera_id)
+        if not pipeline:
+            await asyncio.sleep(0.1)
+            continue
 
         # Get latest frame from the grabber
         frame, _ = pipeline.grabber.get_latest_frame()
@@ -121,23 +143,87 @@ async def mjpeg_generator(app: CCTVApplication, camera_id: str):
                     if track.class_type == "animal":
                         color = (255, 165, 0) # Orange/Blueish in BGR for animal
                         label = f"Animal {track.track_id} ({conf:.0%})"
+                        box_thickness = 3
+                        posture_label = ""
                     else:
                         # Human tracking
-                        color = (0, 255, 0) # Default green
                         track_score_obj = pipeline.latest_track_scores.get(track.track_id)
                         track_score = track_score_obj.total_score if track_score_obj else 0.0
+                        triggered_rules = track_score_obj.rule_reasons if track_score_obj else []
                         
+                        # Determine posture state from bbox
+                        bx1, by1, bx2, by2 = bbox
+                        bw = max(bx2 - bx1, 1)
+                        bh = max(by2 - by1, 1)
+                        aspect = bh / bw
+                        
+                        # Estimate speed from recent centroids
+                        speed = 0.0
+                        if len(track.points) >= 2:
+                            p1 = track.points[-2]
+                            p2 = track.points[-1]
+                            dt = p2.timestamp - p1.timestamp
+                            if dt > 0:
+                                dx = p2.centroid[0] - p1.centroid[0]
+                                dy = p2.centroid[1] - p1.centroid[1]
+                                speed = (dx*dx + dy*dy) ** 0.5 / dt
+                        
+                        if speed >= 25.0:
+                            posture_state = "Berjalan"
+                            posture_color = (255, 200, 0)  # cyan-ish
+                        elif aspect < 1.3 and bh < bw * 1.2:
+                            posture_state = "Duduk"
+                            posture_color = (0, 200, 255)  # orange/yellow
+                        else:
+                            posture_state = "Berdiri Diam"
+                            posture_color = (0, 255, 0)    # green
+                        
+                        # Color based on score level
                         if track_score > pipeline.event_manager.suspicious_threshold:
-                            color = (0, 0, 255) # Red for suspicious
-                        label = f"Human {track.track_id} ({conf:.0%})"
+                            color = (0, 0, 255)    # Red for suspicious
+                            box_thickness = 4
+                        elif track_score > 30:
+                            color = (0, 165, 255)  # Orange for moderate
+                            box_thickness = 3
+                        elif track_score > 0:
+                            color = (0, 255, 255)  # Yellow for low activity
+                            box_thickness = 3
+                        else:
+                            color = (0, 255, 0)    # Green for normal
+                            box_thickness = 3
+                        
+                        # Main label: always show score
+                        label = f"#{track.track_id} {posture_state} | Skor: {track_score:.0f}/100"
+                        
+                        posture_label = posture_state
                     
                     # Draw thick box
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, box_thickness)
                     
-                    # Draw label with confidence
-                    (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                    cv2.rectangle(display_frame, (x1, y1 - 28), (x1 + w + 6, y1), color, -1)
-                    cv2.putText(display_frame, label, (x1 + 3, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    # Draw label with score (top of box)
+                    (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                    cv2.rectangle(display_frame, (x1, y1 - 26), (x1 + w + 6, y1), color, -1)
+                    cv2.putText(display_frame, label, (x1 + 3, y1 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                    
+                    # Draw triggered rules below the bounding box (for humans only)
+                    if track.class_type == "human":
+                        y_offset = y2 + 2
+                        # Posture badge
+                        posture_text = f"[{posture_label}]"
+                        (pw, ph), _ = cv2.getTextSize(posture_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                        cv2.rectangle(display_frame, (x1, y_offset), (x1 + pw + 6, y_offset + 22), posture_color, -1)
+                        cv2.putText(display_frame, posture_text, (x1 + 3, y_offset + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                        y_offset += 24
+                        
+                        # Show triggered rule reasons (max 2 lines)
+                        if triggered_rules:
+                            for reason in triggered_rules[:2]:
+                                rule_text = f"! {reason}"
+                                (rw, rh), _ = cv2.getTextSize(rule_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+                                cv2.rectangle(display_frame, (x1, y_offset), (x1 + rw + 4, y_offset + 18), (0, 0, 180), -1)
+                                cv2.putText(display_frame, rule_text, (x1 + 2, y_offset + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                                y_offset += 20
+
                 # Draw person count HUD overlay (top-left)
                 hud_text = f"Persons: {person_count} | Animals: {animal_count}"
                 cv2.rectangle(display_frame, (5, 5), (280, 35), (0, 0, 0), -1)
@@ -301,6 +387,7 @@ async def get_cameras(app: CCTVApplication = Depends(get_app)):
 
 
 @router.post("/cameras")
+@router.post("/cameras/")
 async def add_camera(req: CameraAddRequest, app: CCTVApplication = Depends(get_app)):
     """Add a new camera to config.yaml (requires restart to take effect)."""
     config_path = Path(app.config_dir) / "config" / "config.yaml"
@@ -322,28 +409,61 @@ async def add_camera(req: CameraAddRequest, app: CCTVApplication = Depends(get_a
             "name": req.name,
             "rtsp_url": req.rtsp_url,
             "enabled": req.enabled,
-            "active_hours": None,
-            "roi_zones": {
+            "active_hours": req.active_hours,
+        }
+        # Add per-camera overrides (only if provided)
+        if req.resolution is not None:
+            new_cam["resolution"] = req.resolution
+        if req.fps is not None:
+            new_cam["fps"] = req.fps
+        if req.confidence_threshold is not None:
+            new_cam["confidence_threshold"] = req.confidence_threshold
+        if req.night_mode is not None:
+            new_cam["night_mode"] = req.night_mode
+        if req.loitering_time_sec is not None:
+            new_cam["loitering_time_sec"] = req.loitering_time_sec
+        if req.alert_threshold is not None:
+            new_cam["alert_threshold"] = req.alert_threshold
+        if req.recording_duration_sec is not None:
+            new_cam["recording_duration_sec"] = req.recording_duration_sec
+        if req.alarm_gate_confidence is not None:
+            new_cam["alarm_gate_confidence"] = req.alarm_gate_confidence
+        if req.alarm_gate_min_frames is not None:
+            new_cam["alarm_gate_min_frames"] = req.alarm_gate_min_frames
+        if req.roi_zones is not None:
+            new_cam["roi_zones"] = req.roi_zones
+        else:
+            new_cam["roi_zones"] = {
                 "restricted_zone": {
                     "points": [[100, 200], [400, 200], [400, 500], [100, 500]]
                 }
             }
-        }
+        if req.crossing_lines is not None:
+            new_cam["crossing_lines"] = req.crossing_lines
         cameras.append(new_cam)
         config_data["cameras"] = cameras
 
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-        return {"status": "ok", "message": f"Camera '{req.name}' added. Restart the application to activate."}
+        # Hot-reload: start the new camera pipeline immediately
+        result = await app.add_camera_pipeline(new_cam)
+
+        return {"status": "ok", "message": result}
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Failed to add camera: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+def _set_or_remove(d: dict, k: str, v: Any):
+    if v is not None:
+        d[k] = v
+    elif k in d:
+        del d[k]
 
 @router.put("/cameras/{camera_id}")
+@router.put("/cameras/{camera_id}/")
 async def update_camera(camera_id: str, req: CameraAddRequest, app: CCTVApplication = Depends(get_app)):
     """Update an existing camera's RTSP URL or name in config.yaml."""
     config_path = Path(app.config_dir) / "config" / "config.yaml"
@@ -359,6 +479,21 @@ async def update_camera(camera_id: str, req: CameraAddRequest, app: CCTVApplicat
                 cam["name"] = req.name
                 cam["rtsp_url"] = req.rtsp_url
                 cam["enabled"] = req.enabled
+                cam["active_hours"] = req.active_hours
+                # Update per-camera overrides
+                _set_or_remove(cam, "resolution", req.resolution)
+                _set_or_remove(cam, "fps", req.fps)
+                _set_or_remove(cam, "confidence_threshold", req.confidence_threshold)
+                _set_or_remove(cam, "night_mode", req.night_mode)
+                _set_or_remove(cam, "loitering_time_sec", req.loitering_time_sec)
+                _set_or_remove(cam, "alert_threshold", req.alert_threshold)
+                _set_or_remove(cam, "recording_duration_sec", req.recording_duration_sec)
+                _set_or_remove(cam, "alarm_gate_confidence", req.alarm_gate_confidence)
+                _set_or_remove(cam, "alarm_gate_min_frames", req.alarm_gate_min_frames)
+                if req.roi_zones is not None:
+                    cam["roi_zones"] = req.roi_zones
+                if req.crossing_lines is not None:
+                    cam["crossing_lines"] = req.crossing_lines
                 found = True
                 break
 
@@ -369,7 +504,18 @@ async def update_camera(camera_id: str, req: CameraAddRequest, app: CCTVApplicat
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-        return {"status": "ok", "message": f"Camera '{camera_id}' updated. Restart the application to apply changes."}
+        # Hot-reload: find the updated cam data and restart its pipeline
+        updated_cam = None
+        for cam in cameras:
+            if cam["camera_id"] == camera_id:
+                updated_cam = cam
+                break
+        if updated_cam:
+            result = await app.update_camera_pipeline(camera_id, updated_cam)
+        else:
+            result = f"Camera '{camera_id}' updated in config."
+
+        return {"status": "ok", "message": result}
     except HTTPException:
         raise
     except Exception as e:
@@ -377,6 +523,7 @@ async def update_camera(camera_id: str, req: CameraAddRequest, app: CCTVApplicat
 
 
 @router.delete("/cameras/{camera_id}")
+@router.delete("/cameras/{camera_id}/")
 async def delete_camera(camera_id: str, app: CCTVApplication = Depends(get_app)):
     """Remove a camera from config.yaml."""
     config_path = Path(app.config_dir) / "config" / "config.yaml"
@@ -395,7 +542,10 @@ async def delete_camera(camera_id: str, app: CCTVApplication = Depends(get_app))
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-        return {"status": "ok", "message": f"Camera '{camera_id}' deleted."}
+        # Hot-reload: stop the pipeline immediately
+        result = await app.remove_camera_pipeline(camera_id)
+
+        return {"status": "ok", "message": result}
     except HTTPException:
         raise
     except Exception as e:
@@ -412,6 +562,7 @@ async def get_telegram_config(app: CCTVApplication = Depends(get_app)):
     env_path = Path(app.config_dir) / ".env"
     bot_token = ""
     chat_id = ""
+    public_url = ""
 
     try:
         if env_path.exists():
@@ -422,6 +573,8 @@ async def get_telegram_config(app: CCTVApplication = Depends(get_app)):
                         bot_token = line.split("=", 1)[1]
                     elif line.startswith("TELEGRAM_CHAT_ID="):
                         chat_id = line.split("=", 1)[1]
+                    elif line.startswith("PUBLIC_URL="):
+                        public_url = line.split("=", 1)[1]
     except Exception as e:
         logger.error("Failed to read .env: %s", e)
 
@@ -437,6 +590,7 @@ async def get_telegram_config(app: CCTVApplication = Depends(get_app)):
         "bot_token_masked": masked_token,
         "bot_token_full": bot_token,
         "chat_id": chat_id,
+        "public_url": public_url,
         "is_active": is_active,
         "stats": stats,
     }
@@ -453,9 +607,10 @@ async def save_telegram_config(req: TelegramConfigRequest, app: CCTVApplication 
             with open(env_path, "r") as f:
                 lines = f.readlines()
 
-        # Update or add token and chat_id
+        # Update or add token, chat_id, and public_url
         token_found = False
         chat_found = False
+        url_found = False
         new_lines = []
         for line in lines:
             if line.strip().startswith("TELEGRAM_BOT_TOKEN="):
@@ -464,6 +619,12 @@ async def save_telegram_config(req: TelegramConfigRequest, app: CCTVApplication 
             elif line.strip().startswith("TELEGRAM_CHAT_ID="):
                 new_lines.append(f"TELEGRAM_CHAT_ID={req.chat_id}\n")
                 chat_found = True
+            elif line.strip().startswith("PUBLIC_URL="):
+                if req.public_url is not None:
+                    new_lines.append(f"PUBLIC_URL={req.public_url}\n")
+                else:
+                    new_lines.append("PUBLIC_URL=\n")
+                url_found = True
             else:
                 new_lines.append(line)
 
@@ -471,6 +632,8 @@ async def save_telegram_config(req: TelegramConfigRequest, app: CCTVApplication 
             new_lines.append(f"TELEGRAM_BOT_TOKEN={req.bot_token}\n")
         if not chat_found:
             new_lines.append(f"TELEGRAM_CHAT_ID={req.chat_id}\n")
+        if not url_found and req.public_url is not None:
+            new_lines.append(f"PUBLIC_URL={req.public_url}\n")
 
         with open(env_path, "w") as f:
             f.writelines(new_lines)
@@ -489,9 +652,13 @@ async def test_telegram(req: TelegramTestRequest, app: CCTVApplication = Depends
         bot = Bot(token=req.bot_token)
         me = await bot.get_me()
 
+        msg_text = f"✅ *CCTV AI \\- Test Notification*\n\n{req.message}\n\nBot: @{me.username}"
+        if req.public_url:
+            msg_text += f"\n🔗 *Dashboard:* [Buka Link]({req.public_url})"
+
         await bot.send_message(
             chat_id=req.chat_id,
-            text=f"✅ *CCTV AI \\- Test Notification*\n\n{req.message}\n\nBot: @{me.username}",
+            text=msg_text,
             parse_mode="MarkdownV2",
         )
 
@@ -504,6 +671,61 @@ async def test_telegram(req: TelegramTestRequest, app: CCTVApplication = Depends
 # =============================================
 # Dashboard Stats & Recordings API
 # =============================================
+
+@router.get("/health")
+async def get_system_health(app: CCTVApplication = Depends(get_app)):
+    """Get system health, resource usage, and connectivity status."""
+    health = {
+        "cameras": [],
+        "ai_engine": "RUNNING" if app.detector else "OFFLINE",
+        "telegram": "CONNECTED" if (app.telegram and app.telegram._enabled) else "OFFLINE",
+        "database": "CONNECTED" if app.db else "OFFLINE",
+        "storage": {"usage_percent": 0, "status": "UNKNOWN"},
+        "cpu": {"percent": psutil.cpu_percent(interval=None)},
+        "ram": {"percent": psutil.virtual_memory().percent},
+        "gpu": {"percent": 0, "name": "None"},
+        "fps_total": 0
+    }
+
+    # GPU Stats
+    try:
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            health["gpu"]["percent"] = round(gpus[0].load * 100, 1)
+            health["gpu"]["name"] = gpus[0].name
+    except Exception as e:
+        logger.debug("Failed to get GPU stats: %s", e)
+
+    # Storage Stats
+    if app.storage_manager:
+        storage_stats = app.storage_manager.get_storage_stats()
+        health["storage"]["usage_percent"] = storage_stats["usage_percent"]
+        if storage_stats["usage_percent"] >= app.config.storage.critical_percent:
+            health["storage"]["status"] = "CRITICAL"
+        elif storage_stats["usage_percent"] >= app.config.storage.warning_percent:
+            health["storage"]["status"] = "WARNING"
+        else:
+            health["storage"]["status"] = "OK"
+
+    # Camera Stats
+    total_fps = 0
+    for cam_id, pipeline in app.pipelines.items():
+        grabber = pipeline.grabber
+        cam_health = grabber.get_health_info() if grabber else {}
+        is_online = cam_health.get("connected", False)
+        fps = cam_health.get("fps", 0)
+        total_fps += fps
+        
+        health["cameras"].append({
+            "camera_id": cam_id,
+            "name": pipeline.camera_config.name,
+            "status": "ONLINE" if is_online else "OFFLINE",
+            "fps": fps
+        })
+        
+    health["fps_total"] = total_fps
+
+    return health
 
 @router.get("/stats/today")
 async def get_stats_today(app: CCTVApplication = Depends(get_app)):

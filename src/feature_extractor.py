@@ -55,6 +55,7 @@ class TrackFeatures:
     bbox_aspect_ratio: float = 1.0  # height / width
     bbox_height_ratio_change: float = 1.0  # current / initial height ratio
     bbox_aspect_stable_sec: float = 0.0  # how long aspect ratio has been low
+    posture_state: str = "unknown"  # "berdiri_diam", "duduk", "berjalan", "unknown"
 
     # Context features
     confidence: float = 0.0
@@ -121,6 +122,7 @@ class FeatureExtractor:
         detections,  # sv.Detections
         motion_level: float = 0.0,
         black_frame_ratio: float = 0.0,
+        validated_track_ids: Optional[Set[int]] = None,
     ) -> Tuple[Dict[int, TrackFeatures], SceneFeatures]:
         """Extract features for all active tracks and the scene.
 
@@ -129,6 +131,8 @@ class FeatureExtractor:
             detections: Current frame's tracked detections (with tracker_id).
             motion_level: From motion detector (0.0-1.0).
             black_frame_ratio: From preprocessor (0.0-1.0).
+            validated_track_ids: If provided, only extract features for these
+                track IDs (from AlarmGate). Tracks not in this set are skipped.
 
         Returns:
             Tuple of (per-track features dict, scene features).
@@ -139,6 +143,14 @@ class FeatureExtractor:
             tid: th for tid, th in tracker.get_active_tracks().items()
             if th.class_type == "human"
         }
+
+        # If validated_track_ids is provided, filter to only those tracks
+        if validated_track_ids is not None:
+            active_tracks = {
+                tid: th for tid, th in active_tracks.items()
+                if tid in validated_track_ids
+            }
+
         person_count = len(active_tracks)
 
         # Scene-level features
@@ -214,6 +226,14 @@ class FeatureExtractor:
             )
             features.approaching_zone = approach_zone
             features.approach_speed = approach_speed
+
+            # Posture state detection (berdiri diam / duduk / berjalan)
+            features.posture_state = self._classify_posture(
+                features.speed_px_per_sec,
+                features.bbox_aspect_ratio,
+                features.bbox_height_ratio_change,
+                history.latest_keypoints
+            )
 
             per_track[track_id] = features
 
@@ -393,6 +413,60 @@ class FeatureExtractor:
         except (ValueError, IndexError):
             logger.debug("Invalid night_mode format. Using start: %s, end: %s", start_str, end_str)
             return False
+
+    @staticmethod
+    def _classify_posture(
+        speed: float,
+        aspect_ratio: float,
+        height_ratio_change: float,
+        keypoints: Optional[np.ndarray] = None,
+    ) -> str:
+        """Classify person posture based on keypoints (if available) or bbox shape.
+
+        Returns:
+            One of: 'berdiri_diam', 'duduk', 'berjalan', 'unknown'.
+        """
+        WALKING_SPEED_THRESHOLD = 25.0   # px/sec — gentle walking
+
+        # Walking / moving
+        if speed >= WALKING_SPEED_THRESHOLD:
+            return "berjalan"
+
+        if keypoints is not None and len(keypoints) >= 17:
+            # Keypoint-based logic (YOLOv8-pose has 17 keypoints)
+            # 5: L Shoulder, 6: R Shoulder, 11: L Hip, 12: R Hip, 15: L Ankle, 16: R Ankle
+            try:
+                # Calculate mean y-coordinates
+                shoulder_y = (keypoints[5][1] + keypoints[6][1]) / 2
+                hip_y = (keypoints[11][1] + keypoints[12][1]) / 2
+                ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
+                
+                # Ensure points are valid (not 0 or near 0 which implies undetected)
+                if shoulder_y > 0 and hip_y > 0 and ankle_y > 0:
+                    torso_length = abs(hip_y - shoulder_y)
+                    leg_length = abs(ankle_y - hip_y)
+                    
+                    # If legs appear very short compared to torso, they are likely bent/sitting
+                    if torso_length > 0 and (leg_length / torso_length) < 1.0:
+                        return "duduk"
+                    else:
+                        return "berdiri_diam"
+            except IndexError:
+                pass # fallback
+
+        # Fallback to bounding box logic
+        SITTING_HEIGHT_RATIO = 0.70      # height dropped to 70% of initial
+        SITTING_ASPECT_CEILING = 1.3     # sitting bbox is wider/squarer
+
+        # Sitting: bbox became significantly shorter AND speed is low
+        if height_ratio_change <= SITTING_HEIGHT_RATIO and aspect_ratio < SITTING_ASPECT_CEILING:
+            return "duduk"
+
+        # Standing still: tall bbox, not moving much
+        if aspect_ratio >= 1.2 and speed < WALKING_SPEED_THRESHOLD:
+            return "berdiri_diam"
+
+        return "berdiri_diam"  # default — upright and still
 
     def cleanup_track(self, track_id: int) -> None:
         """Clean up resources for a removed track."""

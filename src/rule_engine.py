@@ -246,6 +246,22 @@ class RuleEngine:
                             triggered = True
                             break
 
+            elif cond.type == "posture_state":
+                # Posture detection: berdiri_diam, duduk, berjalan
+                target_state = params.get("state", "")
+                min_duration = float(params.get("min_duration_sec", 0))
+                
+                if features.posture_state == target_state:
+                    if min_duration > 0:
+                        triggered = features.dwell_time_sec >= min_duration
+                    else:
+                        triggered = True
+
+            elif cond.type == "person_detected":
+                # Always triggers for any validated person track
+                # This rule makes the system alert on every person detection
+                triggered = True
+
             else:
                 logger.debug("Unknown rule condition type: %s", cond.type)
 

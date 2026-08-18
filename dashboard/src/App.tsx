@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Camera, AlertTriangle, Activity, CheckCircle, Settings, Plus, Trash2, Edit3, Send, Eye, EyeOff, RefreshCw, Bell, BarChart2, Video, X } from 'lucide-react';
+import { Camera, AlertTriangle, Activity, CheckCircle, Settings, Plus, Trash2, Edit3, Send, Eye, EyeOff, RefreshCw, Bell, BarChart2, Video, X, HardDrive, Cpu, Server, WifiOff } from 'lucide-react';
 
 const API_BASE = "/api";
 
@@ -36,7 +36,7 @@ export default function App() {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
             </span>
-            <span className="text-sm text-gray-400">System Online</span>
+            <span className="text-sm text-gray-400">Backend Connected</span>
           </div>
         </header>
 
@@ -109,8 +109,103 @@ function StatCard({ title, value, color }: { title: string, value: string | numb
 }
 
 // ============================================================
-// LIVE VIEW
+// LIVE VIEW & SYSTEM HEALTH
 // ============================================================
+
+function SystemHealthBanner() {
+  const [health, setHealth] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchHealth = () => {
+      fetch(`${API_BASE}/health`).then(r => r.json()).then(d => setHealth(d)).catch(() => {});
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!health) return null;
+
+  return (
+    <div className="glass-panel p-4 mb-6 grid grid-cols-2 md:grid-cols-5 gap-4 text-sm bg-gray-900/80 border border-gray-800 rounded-xl">
+      {/* Cameras */}
+      <div className="flex flex-col gap-1 border-r border-gray-700/50 pr-4">
+        <span className="text-gray-400 font-medium mb-1 uppercase text-xs">Cameras</span>
+        {health.cameras.map((c: any) => (
+          <div key={c.camera_id} className="flex justify-between items-center">
+            <span>{c.camera_id.toUpperCase()}</span>
+            {c.status === 'ONLINE' ? (
+              <span className="text-green-400 flex items-center gap-1"><CheckCircle size={12}/> ONLINE</span>
+            ) : (
+              <span className="text-red-400 font-bold flex items-center gap-1 animate-pulse"><WifiOff size={12}/> OFFLINE</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Services */}
+      <div className="flex flex-col gap-1 border-r border-gray-700/50 pr-4">
+        <span className="text-gray-400 font-medium mb-1 uppercase text-xs">Services</span>
+        <div className="flex justify-between">
+          <span>AI Engine</span>
+          <span className="text-green-400">🟢 {health.ai_engine}</span>
+        </div>
+        <div className="flex justify-between">
+          <span>Telegram</span>
+          <span className="text-green-400">🟢 {health.telegram}</span>
+        </div>
+        <div className="flex justify-between">
+          <span>Database</span>
+          <span className="text-green-400">🟢 {health.database}</span>
+        </div>
+      </div>
+
+      {/* Compute */}
+      <div className="flex flex-col gap-1 border-r border-gray-700/50 pr-4">
+        <span className="text-gray-400 font-medium mb-1 uppercase text-xs">Compute</span>
+        <div className="flex justify-between items-center">
+          <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400"/> CPU</span>
+          <span className={health.cpu.percent > 85 ? 'text-red-400' : 'text-gray-200'}>{health.cpu.percent}%</span>
+        </div>
+        <div className="flex justify-between items-center">
+          <span className="flex items-center gap-1"><Cpu size={14} className="text-purple-400"/> GPU</span>
+          <span className={health.gpu.percent > 85 ? 'text-red-400' : 'text-gray-200'}>{health.gpu.percent}%</span>
+        </div>
+        <div className="flex justify-between items-center">
+          <span className="flex items-center gap-1"><Server size={14} className="text-emerald-400"/> RAM</span>
+          <span className={health.ram.percent > 85 ? 'text-red-400' : 'text-gray-200'}>{health.ram.percent}%</span>
+        </div>
+      </div>
+
+      {/* Storage & Performance */}
+      <div className="flex flex-col gap-1 md:col-span-2">
+        <span className="text-gray-400 font-medium mb-1 uppercase text-xs">Performance & Storage</span>
+        <div className="flex justify-between items-center">
+          <span className="flex items-center gap-1"><Activity size={14} className="text-cyan-400"/> Total Pipeline FPS</span>
+          <span className="text-cyan-400 font-bold">{health.fps_total.toFixed(1)}</span>
+        </div>
+        <div className="flex justify-between items-center mt-2">
+          <span className="flex items-center gap-1"><HardDrive size={14} className="text-yellow-400"/> Storage Usage</span>
+          {health.storage.status === 'OK' ? (
+            <span className="text-green-400">🟢 {health.storage.usage_percent}%</span>
+          ) : health.storage.status === 'WARNING' ? (
+            <span className="text-yellow-400 font-bold animate-pulse">⚠️ {health.storage.usage_percent}% (Warning)</span>
+          ) : (
+            <span className="text-red-500 font-bold animate-pulse">🚨 {health.storage.usage_percent}% (CRITICAL)</span>
+          )}
+        </div>
+        {/* Storage Bar */}
+        <div className="w-full bg-gray-800 rounded-full h-2 mt-1">
+          <div 
+            className={`h-2 rounded-full ${health.storage.status === 'CRITICAL' ? 'bg-red-500' : health.storage.status === 'WARNING' ? 'bg-yellow-500' : 'bg-green-500'}`} 
+            style={{width: `${Math.min(100, health.storage.usage_percent)}%`}}
+          ></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LiveView() {
   const [cameras, setCameras] = useState<any[]>([]);
 
@@ -125,6 +220,8 @@ function LiveView() {
 
   return (
     <div className="space-y-6">
+      <SystemHealthBanner />
+      
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {cameras.length === 0 ? (
           <div className="glass-panel p-12 text-center text-gray-500 col-span-full">
@@ -152,9 +249,11 @@ function LiveView() {
               />
               {cam.state !== 'NORMAL' && (
                 <div className="absolute top-4 right-4 bg-red-500/80 backdrop-blur text-white px-3 py-1 rounded-full text-sm font-bold animate-pulse flex items-center gap-1">
-                  <AlertTriangle size={14} /> ALERT
+                  <AlertTriangle size={14} /> {cam.state}
                 </div>
               )}
+              {/* Show offline overlay if backend reports camera is not connected but UI hasn't caught up via status */}
+              {/* (We rely on Health Banner for actual offline status, but this provides visual feedback on the feed) */}
             </div>
           </div>
         ))}
@@ -283,8 +382,8 @@ function CameraManager() {
 
   const handleSubmit = async () => {
     try {
-      const url = editMode ? `${API_BASE}/cameras/${editMode}` : `${API_BASE}/cameras`;
-      const method = editMode ? 'PUT' : 'POST';
+      const url = editMode !== null ? `${API_BASE}/cameras/${editMode}` : `${API_BASE}/cameras`;
+      const method = editMode !== null ? 'PUT' : 'POST';
       const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
       const data = await res.json();
       if (res.ok) {
@@ -335,25 +434,25 @@ function CameraManager() {
       {/* Add/Edit form */}
       {showForm && (
         <div className="glass-panel p-6 space-y-4">
-          <h4 className="font-semibold text-blue-400">{editMode ? 'Edit Camera' : 'Add New Camera'}</h4>
+          <h4 className="font-semibold text-blue-400">{editMode !== null ? 'Edit Camera' : 'Add New Camera'}</h4>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm text-gray-400 mb-1">Camera ID</label>
               <input type="text" value={formData.camera_id} onChange={e => setFormData({ ...formData, camera_id: e.target.value })}
-                disabled={!!editMode} placeholder="cam_03"
+                disabled={editMode !== null} placeholder=""
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none disabled:opacity-50" />
             </div>
             <div>
               <label className="block text-sm text-gray-400 mb-1">Camera Name</label>
               <input type="text" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Living Room Camera"
+                placeholder=""
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
             </div>
           </div>
           <div>
             <label className="block text-sm text-gray-400 mb-1">RTSP URL</label>
             <input type="text" value={formData.rtsp_url} onChange={e => setFormData({ ...formData, rtsp_url: e.target.value })}
-              placeholder="rtsp://admin:password@192.168.1.100:554/stream1"
+              placeholder=""
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none font-mono text-sm" />
           </div>
           <div className="flex items-center gap-3">
@@ -365,7 +464,7 @@ function CameraManager() {
           </div>
           <div className="flex gap-3">
             <button onClick={handleSubmit} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium transition-colors">
-              {editMode ? 'Save Changes' : 'Add Camera'}
+              {editMode !== null ? 'Save Changes' : 'Add Camera'}
             </button>
             <button onClick={() => { setShowForm(false); setEditMode(null); }} className="px-5 py-2.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors">
               Cancel
@@ -404,8 +503,8 @@ function CameraManager() {
       </div>
 
       {cameras.length > 0 && (
-        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 text-sm text-yellow-300">
-          ⚠️ Setelah menambah/mengubah/menghapus kamera, <strong>restart aplikasi</strong> (<code>python src/main.py</code>) agar perubahan aktif.
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 text-sm text-blue-300">
+          ✅ Kamera akan otomatis <strong>aktif/nonaktif</strong> setelah ditambah, diubah, atau dihapus — tanpa perlu restart aplikasi.
         </div>
       )}
     </div>
@@ -419,6 +518,7 @@ function TelegramConfig() {
   const [tgConfig, setTgConfig] = useState<any>(null);
   const [botToken, setBotToken] = useState('');
   const [chatId, setChatId] = useState('');
+  const [publicUrl, setPublicUrl] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [message, setMessage] = useState<{type: string, text: string} | null>(null);
   const [testing, setTesting] = useState(false);
@@ -429,13 +529,14 @@ function TelegramConfig() {
       setTgConfig(d);
       setBotToken(d.bot_token_full || '');
       setChatId(d.chat_id || '');
+      setPublicUrl(d.public_url || '');
     }).catch(() => {});
   }, []);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/telegram`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot_token: botToken, chat_id: chatId }) });
+      const res = await fetch(`${API_BASE}/telegram`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot_token: botToken, chat_id: chatId, public_url: publicUrl }) });
       const data = await res.json();
       if (res.ok) setMessage({ type: 'success', text: data.message });
       else setMessage({ type: 'error', text: data.detail });
@@ -446,7 +547,7 @@ function TelegramConfig() {
   const handleTest = async () => {
     setTesting(true);
     try {
-      const res = await fetch(`${API_BASE}/telegram/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot_token: botToken, chat_id: chatId }) });
+      const res = await fetch(`${API_BASE}/telegram/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot_token: botToken, chat_id: chatId, public_url: publicUrl }) });
       const data = await res.json();
       if (res.ok) setMessage({ type: 'success', text: `✅ Test sent! Bot: @${data.bot_username}` });
       else setMessage({ type: 'error', text: data.detail });
@@ -492,6 +593,13 @@ function TelegramConfig() {
           <label className="block text-sm text-gray-400 mb-1">Chat ID</label>
           <input type="text" value={chatId} onChange={e => setChatId(e.target.value)}
             placeholder="7538465708"
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none font-mono text-sm" />
+        </div>
+
+        <div>
+          <label className="block text-sm text-gray-400 mb-1">Public URL (Opsional, untuk link di notifikasi)</label>
+          <input type="text" value={publicUrl} onChange={e => setPublicUrl(e.target.value)}
+            placeholder="https://example.trycloudflare.com"
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none font-mono text-sm" />
         </div>
 

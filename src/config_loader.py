@@ -30,6 +30,16 @@ class ROIZone:
 
 
 @dataclass
+class AlarmGateConfig:
+    """Anti-False Alarm pipeline configuration."""
+    confidence_gate: float = 0.60       # Min confidence to pass pipeline
+    min_frames: int = 3                 # Min consecutive frames
+    min_bbox_area: int = 400            # Min bbox area (px²)
+    max_bbox_ratio: float = 0.5         # Max bbox area relative to frame
+    max_aspect_ratio: float = 5.0       # Max height/width ratio
+
+
+@dataclass
 class CameraConfig:
     """Per-camera configuration."""
     camera_id: str
@@ -39,6 +49,19 @@ class CameraConfig:
     active_hours: Optional[str] = None  # e.g. "22:00-05:00"
     roi_zones: Dict[str, ROIZone] = field(default_factory=dict)
     crossing_lines: Dict[str, Any] = field(default_factory=dict)
+
+    # --- Per-camera overrides (None = use global default) ---
+    resolution: Optional[Tuple[int, int]] = None
+    fps: Optional[int] = None
+    confidence_threshold: Optional[float] = None
+    night_mode: Optional[bool] = None                   # None=auto, True/False=manual
+    loitering_time_sec: Optional[float] = None
+    alert_threshold: Optional[float] = None
+    recording_duration_sec: Optional[int] = None
+
+    # Anti-false alarm per-camera overrides
+    alarm_gate_confidence: Optional[float] = None
+    alarm_gate_min_frames: Optional[int] = None
 
 
 @dataclass
@@ -58,6 +81,15 @@ class DatabaseConfig:
     path: str = "data/cctv_events.db"
     cleanup_days: int = 30
     snapshot_dir: str = "snapshots"
+
+
+@dataclass
+class StorageConfig:
+    """Storage management settings."""
+    warning_percent: float = 80.0
+    critical_percent: float = 90.0
+    auto_delete_threshold: float = 95.0
+    retention_days: int = 30
 
 
 @dataclass
@@ -116,9 +148,13 @@ class AppConfig:
     night_mode_end: str = "05:00"
     night_mode_multiplier: float = 2.0
 
+    # Anti-False Alarm Pipeline
+    alarm_gate: AlarmGateConfig = field(default_factory=AlarmGateConfig)
+
     # Sub-configs
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
 
     # Rules
     rules: List[Rule] = field(default_factory=list)
@@ -172,6 +208,12 @@ def _parse_camera(raw: Dict[str, Any]) -> CameraConfig:
 
     crossing_lines = raw.get("crossing_lines", {})
 
+    # Parse per-camera resolution override
+    res_raw = raw.get("resolution")
+    resolution = None
+    if res_raw and isinstance(res_raw, (list, tuple)) and len(res_raw) == 2:
+        resolution = (int(res_raw[0]), int(res_raw[1]))
+
     return CameraConfig(
         camera_id=raw["camera_id"],
         name=raw["name"],
@@ -180,7 +222,27 @@ def _parse_camera(raw: Dict[str, Any]) -> CameraConfig:
         active_hours=raw.get("active_hours"),
         roi_zones=zones,
         crossing_lines=crossing_lines,
+        # Per-camera overrides
+        resolution=resolution,
+        fps=raw.get("fps"),
+        confidence_threshold=_opt_float(raw.get("confidence_threshold")),
+        night_mode=raw.get("night_mode"),
+        loitering_time_sec=_opt_float(raw.get("loitering_time_sec")),
+        alert_threshold=_opt_float(raw.get("alert_threshold")),
+        recording_duration_sec=_opt_int(raw.get("recording_duration_sec")),
+        alarm_gate_confidence=_opt_float(raw.get("alarm_gate_confidence")),
+        alarm_gate_min_frames=_opt_int(raw.get("alarm_gate_min_frames")),
     )
+
+
+def _opt_float(val: Any) -> Optional[float]:
+    """Convert to float if not None."""
+    return float(val) if val is not None else None
+
+
+def _opt_int(val: Any) -> Optional[int]:
+    """Convert to int if not None."""
+    return int(val) if val is not None else None
 
 
 def _parse_telegram(raw: Dict[str, Any]) -> TelegramConfig:
@@ -201,6 +263,16 @@ def _parse_database(raw: Dict[str, Any]) -> DatabaseConfig:
         path=str(raw.get("path", "data/cctv_events.db")),
         cleanup_days=int(raw.get("cleanup_days", 30)),
         snapshot_dir=str(raw.get("snapshot_dir", "snapshots")),
+    )
+
+
+def _parse_storage(raw: Dict[str, Any]) -> StorageConfig:
+    """Parse storage management configuration."""
+    return StorageConfig(
+        warning_percent=float(raw.get("warning_percent", 80.0)),
+        critical_percent=float(raw.get("critical_percent", 90.0)),
+        auto_delete_threshold=float(raw.get("auto_delete_threshold", 95.0)),
+        retention_days=int(raw.get("retention_days", 30)),
     )
 
 
@@ -284,7 +356,17 @@ class ConfigLoader:
         # 7. Parse motion_sensitivity — normalize to numeric if string
         motion_sens = raw_config.get("motion_sensitivity", "med")
 
-        # 8. Build AppConfig
+        # 8. Parse alarm_gate config
+        alarm_gate_raw = raw_config.get("alarm_gate", {})
+        alarm_gate = AlarmGateConfig(
+            confidence_gate=float(alarm_gate_raw.get("confidence_gate", 0.60)),
+            min_frames=int(alarm_gate_raw.get("min_frames", 3)),
+            min_bbox_area=int(alarm_gate_raw.get("min_bbox_area", 400)),
+            max_bbox_ratio=float(alarm_gate_raw.get("max_bbox_ratio", 0.5)),
+            max_aspect_ratio=float(alarm_gate_raw.get("max_aspect_ratio", 5.0)),
+        )
+
+        # 9. Build AppConfig
         telegram_raw = raw_config.get("telegram", {})
         database_raw = raw_config.get("database", {})
 
@@ -309,8 +391,10 @@ class ConfigLoader:
             night_mode_start=str(raw_config.get("night_mode_start", "22:00")),
             night_mode_end=str(raw_config.get("night_mode_end", "05:00")),
             night_mode_multiplier=float(raw_config.get("night_mode_multiplier", 2.0)),
+            alarm_gate=alarm_gate,
             telegram=_parse_telegram(telegram_raw),
             database=_parse_database(database_raw),
+            storage=_parse_storage(raw_config.get("storage", {})),
             rules=rules,
             log_level=str(raw_config.get("log_level", "INFO")),
             log_file=str(raw_config.get("log_file", "data/cctv_ai.log")),
