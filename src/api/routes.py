@@ -121,18 +121,23 @@ async def mjpeg_generator(app: CCTVApplication, camera_id: str):
                     if track.class_type == "animal":
                         color = (255, 165, 0) # Orange/Blueish in BGR for animal
                         label = f"Animal {track.track_id} ({conf:.0%})"
+                        box_thickness = 3
                     else:
                         # Human tracking
                         color = (0, 255, 0) # Default green
+                        box_thickness = 3
                         track_score_obj = pipeline.latest_track_scores.get(track.track_id)
                         track_score = track_score_obj.total_score if track_score_obj else 0.0
                         
                         if track_score > pipeline.event_manager.suspicious_threshold:
                             color = (0, 0, 255) # Red for suspicious
-                        label = f"Human {track.track_id} ({conf:.0%})"
+                            box_thickness = 4
+                            label = f"MENCURIGAKAN {track.track_id} (Skor: {track_score:.0f})"
+                        else:
+                            label = f"Human {track.track_id} ({conf:.0%})"
                     
                     # Draw thick box
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, box_thickness)
                     
                     # Draw label with confidence
                     (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)

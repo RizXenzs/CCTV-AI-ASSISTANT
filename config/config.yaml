@@ -9,7 +9,7 @@ cameras:
   camera_id: cam_02
   enabled: false
   name: Backyard Camera
-  rtsp_url: ''
+  rtsp_url: rtsp://admin:password123%23@192.168.1.20:554/Streaming/Channels/101
 confidence_threshold: 0.15
 critical_score_threshold: 80
 database:
