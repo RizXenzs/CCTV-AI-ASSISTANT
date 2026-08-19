@@ -1,11 +1,12 @@
 """
-frame_grabber.py — Threaded RTSP frame reader with reconnection logic.
+frame_grabber.py — Threaded RTSP/HLS frame reader with reconnection logic.
 
-Uses a dedicated thread per camera to continuously read frames from RTSP streams.
+Uses a dedicated thread per camera to continuously read frames from RTSP or HLS (.m3u8) streams.
 Always provides the latest frame (drops old frames to prevent latency buildup).
 """
 
 import logging
+import os
 import threading
 import time
 from typing import Optional, Tuple
@@ -13,28 +14,33 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+# OPTIMASI HLS/RTSP: Paksa FFmpeg membuang buffer agar selalu mendapatkan frame live terbaru
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|sync;ext"
+
 logger = logging.getLogger(__name__)
 
 
 class FrameGrabber:
-    """Threaded RTSP/IP camera frame grabber.
+    """Threaded RTSP/HLS/IP camera frame grabber.
 
-    Runs a background thread that continuously reads from the video source
-    and stores only the most recent frame. This prevents RTSP buffer buildup
-    and ensures the processing pipeline always works on the latest frame.
+    Runs a background thread that continuously reads from the video source (.m3u8 / RTSP)
+    and stores only the most recent frame. This prevents buffer buildup and ensures
+    the processing pipeline always works on the latest live frame.
     """
 
     def __init__(
         self,
-        camera_id: str,
-        rtsp_url: str,
+        camera_id: str = "cam_01",
+        stream_url: str = "",
+        rtsp_url: Optional[str] = None,  # Backward compatibility
         name: str = "",
         reconnect_max_retries: int = 5,
         reconnect_base_delay: float = 2.0,
         reconnect_max_delay: float = 60.0,
     ):
         self.camera_id = camera_id
-        self.rtsp_url = rtsp_url
+        # Gunakan stream_url, atau rtsp_url jika dipanggil menggunakan parameter lama
+        self.stream_url = stream_url or rtsp_url or ""
         self.name = name or camera_id
 
         # Reconnection settings
@@ -107,23 +113,38 @@ class FrameGrabber:
         with self._frame_lock:
             if self._frame is None:
                 return None, 0.0
-            # Return a copy to prevent race conditions
             return self._frame.copy(), self._frame_timestamp
 
-    def _create_capture(self) -> Optional[cv2.VideoCapture]:
-        """Create and configure a VideoCapture instance."""
+   def _create_capture(self) -> Optional[cv2.VideoCapture]:
+        """Create and configure a VideoCapture instance (supports RTSP & HLS HTTP/HTTPS)."""
         try:
-            # Use FFMPEG backend for better RTSP handling
-            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-
-            if not cap.isOpened():
-                logger.error("[%s] Failed to open stream: %s", self.camera_id, self.rtsp_url)
+            if not self.stream_url:
+                logger.error("[%s] Stream URL is empty", self.camera_id)
                 return None
 
-            # Minimize buffer to always get latest frame
+            cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
+
+            if not cap.isOpened():
+                logger.error("[%s] Failed to open stream: %s", self.camera_id, self.stream_url)
+                return None
+
+            # Paksa buffer sekecil mungkin
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            # Timeout
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+
+            return cap
+
+        except Exception as e:
+            logger.error("[%s] Error creating capture: %s", self.camera_id, e)
+            return None
+
+            # Minimize buffer untuk meminimalkan delay/latency
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-            # Try to set reasonable capture properties
+            # Timeout setting
             cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
             cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
 
@@ -152,7 +173,6 @@ class FrameGrabber:
                 self._connected.clear()
                 cap = self._try_reconnect()
                 if cap is None:
-                    # All retries exhausted — wait before trying again
                     if self._running.is_set():
                         logger.warning(
                             "[%s] Reconnection exhausted, cooling down 30s...",
@@ -176,6 +196,7 @@ class FrameGrabber:
             if not ret or frame is None:
                 self._consecutive_failures += 1
                 self._drop_count += 1
+                time.sleep(0.05)  # Mencegah CPU spinning tinggi saat stream terputus singkat
 
                 if self._consecutive_failures > 30:
                     logger.warning(
@@ -226,7 +247,6 @@ class FrameGrabber:
                 logger.info("[%s] Reconnected successfully", self.camera_id)
                 return cap
 
-            # Exponential backoff
             delay = min(
                 self._reconnect_base_delay * (2 ** (attempt - 1)),
                 self._reconnect_max_delay,
