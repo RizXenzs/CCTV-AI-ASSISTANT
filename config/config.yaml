@@ -7,9 +7,9 @@ alarm_gate:
 alert_cooldown_sec: 30
 cameras:
 - active_hours: null
-  camera_id: ''
+  camera_id: CAMERAS 01
   enabled: true
-  name: gudang room
+  name: RUANG TEKNISI
   roi_zones:
     restricted_zone:
       points:
@@ -21,7 +21,23 @@ cameras:
         - 500
       - - 100
         - 500
-  rtsp_url: rtsp://admin:password123%23@10.10.11.119:554/Streaming/Channels/101
+  rtsp_url: rtsp://admin:password123%23@10.10.11.103:554/Streaming/Channels/101
+- active_hours: null
+  camera_id: CAMERAS 02
+  enabled: true
+  name: GENSET
+  roi_zones:
+    restricted_zone:
+      points:
+      - - 100
+        - 200
+      - - 400
+        - 200
+      - - 400
+        - 500
+      - - 100
+        - 500
+  rtsp_url: rtsp://admin:password123%23@10.10.11.112:554/Streaming/Channels/101
 confidence_threshold: 0.15
 critical_score_threshold: 80
 database:
