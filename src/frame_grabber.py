@@ -32,14 +32,13 @@ class FrameGrabber:
         self,
         camera_id: str = "cam_01",
         stream_url: str = "",
-        rtsp_url: Optional[str] = None,  # Backward compatibility
+        rtsp_url: Optional[str] = None,
         name: str = "",
         reconnect_max_retries: int = 5,
         reconnect_base_delay: float = 2.0,
         reconnect_max_delay: float = 60.0,
     ):
         self.camera_id = camera_id
-        # Gunakan stream_url, atau rtsp_url jika dipanggil menggunakan parameter lama
         self.stream_url = stream_url or rtsp_url or ""
         self.name = name or camera_id
 
@@ -105,17 +104,13 @@ class FrameGrabber:
         logger.info("[%s] Frame grabber stopped", self.camera_id)
 
     def get_latest_frame(self) -> Tuple[Optional[np.ndarray], float]:
-        """Get the most recent frame and its timestamp.
-
-        Returns:
-            Tuple of (frame, timestamp). Frame is None if no frame available.
-        """
+        """Get the most recent frame and its timestamp."""
         with self._frame_lock:
             if self._frame is None:
                 return None, 0.0
             return self._frame.copy(), self._frame_timestamp
 
-   def _create_capture(self) -> Optional[cv2.VideoCapture]:
+    def _create_capture(self) -> Optional[cv2.VideoCapture]:
         """Create and configure a VideoCapture instance (supports RTSP & HLS HTTP/HTTPS)."""
         try:
             if not self.stream_url:
@@ -128,23 +123,7 @@ class FrameGrabber:
                 logger.error("[%s] Failed to open stream: %s", self.camera_id, self.stream_url)
                 return None
 
-            # Paksa buffer sekecil mungkin
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            # Timeout
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-
-            return cap
-
-        except Exception as e:
-            logger.error("[%s] Error creating capture: %s", self.camera_id, e)
-            return None
-
-            # Minimize buffer untuk meminimalkan delay/latency
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-            # Timeout setting
             cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
             cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
 
@@ -168,7 +147,6 @@ class FrameGrabber:
         fps_frame_count = 0
 
         while self._running.is_set():
-            # --- Connect / Reconnect ---
             if cap is None or not cap.isOpened():
                 self._connected.clear()
                 cap = self._try_reconnect()
@@ -185,7 +163,6 @@ class FrameGrabber:
                 fps_timer = time.monotonic()
                 fps_frame_count = 0
 
-            # --- Read frame ---
             try:
                 ret, frame = cap.read()
             except Exception as e:
@@ -196,7 +173,7 @@ class FrameGrabber:
             if not ret or frame is None:
                 self._consecutive_failures += 1
                 self._drop_count += 1
-                time.sleep(0.05)  # Mencegah CPU spinning tinggi saat stream terputus singkat
+                time.sleep(0.05)
 
                 if self._consecutive_failures > 30:
                     logger.warning(
@@ -208,7 +185,6 @@ class FrameGrabber:
                     cap = None
                 continue
 
-            # --- Store latest frame (thread-safe) ---
             self._consecutive_failures = 0
             with self._frame_lock:
                 self._frame = frame
@@ -217,14 +193,12 @@ class FrameGrabber:
             self._frame_count += 1
             fps_frame_count += 1
 
-            # --- Calculate actual FPS (every 2 seconds) ---
             elapsed = time.monotonic() - fps_timer
             if elapsed >= 2.0:
                 self._fps_actual = fps_frame_count / elapsed
                 fps_frame_count = 0
                 fps_timer = time.monotonic()
 
-        # --- Cleanup ---
         if cap is not None:
             cap.release()
         logger.info("[%s] Capture loop exited", self.camera_id)
